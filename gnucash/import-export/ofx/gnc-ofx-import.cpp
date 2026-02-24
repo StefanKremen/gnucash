@@ -1003,6 +1003,30 @@ int ofx_proc_transaction_cb(OfxTransactionData data, void *user_data)
     fill_transaction_description(transaction, &data);
     fill_transaction_notes(transaction, &data);
 
+    /* --- Fio Banka: override description and date --- */
+    if (is_fio_banka(&data))
+    {
+        /* OFX-07: Use MEMO as Description, NAME as Notes (all Fio transactions) */
+        if (data.memo_valid)
+        {
+            xaccTransSetDescription(transaction, data.memo);
+        }
+        if (data.name_valid)
+        {
+            xaccTransSetNotes(transaction, data.name);
+        }
+
+        /* OFX-02: Extract actual transaction date from MEMO pattern */
+        if (data.memo_valid)
+        {
+            time64 memo_date = extract_date_from_fio_memo(data.memo);
+            if (memo_date != 0)
+            {
+                xaccTransSetDatePostedSecsNormalized(transaction, memo_date);
+            }
+        }
+    }
+
     if (data.account_ptr && data.account_ptr->currency_valid)
     {
         DEBUG("Currency from libofx: %s", data.account_ptr->currency);
