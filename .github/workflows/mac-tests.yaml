@@ -1,5 +1,9 @@
 name: mac-tests
-on: [push, pull_request]
+on:
+  push:
+    branches:
+      - stable         # your custom stable (upstream + features)
+      - 'feature/**'   # all feature branches
 permissions: {}
 jobs:
   ci_tests_mac:
