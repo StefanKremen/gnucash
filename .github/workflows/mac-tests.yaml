@@ -47,7 +47,7 @@ jobs:
       run: |
         mkdir $HOME/gnucash/build
         cd $HOME/gnucash/build
-        cmake -GNinja -DPKG_CONFIG_EXECUTABLE=$PREFIX/bin/pkgconf -DCMAKE_INSTALL_PREFIX=$PREFIX -DCMAKE_PREFIX_PATH=$PREFIX -DWITH_PYTHON=ON -DGTEST_ROOT=$SRCROOT/googletest $GITHUB_WORKSPACE
+        cmake -GNinja -DPKG_CONFIG_EXECUTABLE=$PREFIX/bin/pkgconf -DCMAKE_INSTALL_PREFIX=$PREFIX -DCMAKE_PREFIX_PATH=$PREFIX -DWITH_PYTHON=OFF -DGTEST_ROOT=$SRCROOT/googletest $GITHUB_WORKSPACE
     - name: Build and Test GnuCash
       run: |
         cd $HOME/gnucash/build
@@ -55,6 +55,218 @@ jobs:
         ninja check
       env:
         CTEST_OUTPUT_ON_FAILURE: On
+    - name: Install GnuCash
+      if: success()
+      run: |
+        cd $HOME/gnucash/build
+        ninja install
+    - name: Install gtk-mac-bundler
+      if: success()
+      run: |
+        git clone --depth 1 https://github.com/GNOME/gtk-mac-bundler.git /tmp/gtk-mac-bundler
+        cd /tmp/gtk-mac-bundler
+        make install bindir=$PREFIX/bin
+        # Bundler calls 'pkg-config'; tarball provides 'pkgconf'
+        ln -sf $PREFIX/bin/pkgconf $PREFIX/bin/pkg-config
+        # Bundler runs these tools to generate cache files, but they're
+        # not in the prebuilt dep tarball. Create stubs that output empty
+        # caches — GTK/gdk-pixbuf fall back to scanning module dirs at runtime.
+        for tool in gtk-query-immodules-3.0 gdk-pixbuf-query-loaders; do
+          if [ ! -f "$PREFIX/bin/$tool" ]; then
+            printf '#!/bin/sh\necho "# stub — tool not in dep tarball"\n' > "$PREFIX/bin/$tool"
+            chmod +x "$PREFIX/bin/$tool"
+          fi
+        done
+    - name: Download app icon
+      if: success()
+      run: |
+        curl -L -o $GITHUB_WORKSPACE/packaging/macos/gnucash.icns \
+          https://raw.githubusercontent.com/Gnucash/gnucash-on-osx/master/gnucash-bundler/gnucash.icns
+    - name: List PREFIX contents (diagnostic)
+      if: success()
+      run: |
+        echo "=== bin/ ===" && ls $PREFIX/bin/ | head -40
+        echo "=== lib/ dirs ===" && ls -d $PREFIX/lib/*/
+        echo "=== share/ dirs ===" && ls -d $PREFIX/share/*/
+        echo "=== etc/ dirs ===" && ls -d $PREFIX/etc/*/ 2>/dev/null || echo "(no etc subdirs)"
+        echo "=== share/glib-2.0/ ===" && ls $PREFIX/share/glib-2.0/ 2>/dev/null || echo "(missing)"
+        echo "=== share/locale/ sample ===" && ls $PREFIX/share/locale/ | head -10
+    - name: Install Adwaita icon theme
+      if: success()
+      run: |
+        brew install adwaita-icon-theme hicolor-icon-theme
+        # Copy Adwaita + hicolor into PREFIX so bundler picks them up.
+        # Exclude cursors/ — Adwaita cursors are symlinks that confuse
+        # the bundler, and macOS uses native cursors anyway.
+        BREW_ICONS="$(brew --prefix)/share/icons"
+        for theme in Adwaita hicolor; do
+          if [ -d "$BREW_ICONS/$theme" ]; then
+            rsync -aL --exclude='cursors' "$BREW_ICONS/$theme/" "$PREFIX/share/icons/$theme/"
+            echo "Copied $theme icon theme"
+          fi
+        done
+        # Do NOT generate icon-theme.cache here. The bundled GTK (3.24.48)
+        # may not be able to read caches from brew's newer GTK. Without the
+        # cache, GTK falls back to directory scanning which works fine.
+        # Note: hicolor-icon-theme must be installed explicitly — it is NOT
+        # a dependency of adwaita-icon-theme. The bundler overwrites
+        # index.theme with a stub — it gets restored in the
+        # "Fix icon themes in bundle" step after bundling.
+    - name: Install libofx DTD files
+      if: success()
+      run: |
+        # libofx needs OFX/OFC DTD files at runtime to parse bank statements.
+        # The dep tarball includes libofx.dylib but NOT the DTD data files.
+        # Copy them from brew into PREFIX so the bundler picks them up.
+        if [ ! -d "$PREFIX/share/libofx/dtd" ]; then
+          brew install libofx
+          LIBOFX_DTD="$(brew --prefix libofx)/share/libofx/dtd"
+          if [ -d "$LIBOFX_DTD" ]; then
+            mkdir -p "$PREFIX/share/libofx/dtd"
+            cp "$LIBOFX_DTD"/* "$PREFIX/share/libofx/dtd/"
+            echo "Copied libofx DTDs from brew:"
+            ls "$PREFIX/share/libofx/dtd/"
+          else
+            echo "ERROR: libofx DTD dir not found after brew install" && exit 1
+          fi
+        else
+          echo "libofx DTDs already in PREFIX"
+          ls "$PREFIX/share/libofx/dtd/"
+        fi
+    - name: Create macOS app bundle
+      if: success()
+      run: |
+        cd $GITHUB_WORKSPACE/packaging/macos
+        gtk-mac-bundler gnucash-custom.bundle
+      env:
+        PKG_CONFIG_PATH: ${{ env.PREFIX }}/lib/pkgconfig:${{ env.PREFIX }}/share/pkgconfig
+        BUNDLE_DEST: ${{ github.workspace }}
+    - name: Compile GSettings schemas in bundle
+      if: success()
+      run: |
+        SCHEMA_DIR="$GITHUB_WORKSPACE/Gnucash.app/Contents/Resources/share/glib-2.0/schemas"
+        if [ ! -d "$SCHEMA_DIR" ]; then
+          echo "ERROR: schema dir not found in bundle" && exit 1
+        fi
+        # GTK3 schemas (org.gtk.Settings.FileChooser etc.) are required at
+        # runtime for file chooser dialogs. The dep tarball only ships a
+        # pre-compiled gschemas.compiled (no XML sources), and ninja install
+        # overwrites it with GnuCash-only schemas. We need the XML sources
+        # to recompile a complete gschemas.compiled.
+        #
+        # Search strategy: dep tarball PREFIX, brew linked path, brew keg path.
+        # Fall back to installing gtk+3 from brew if none found.
+        GTK_SCHEMA_FOUND=false
+        for dir in \
+          "$PREFIX/share/glib-2.0/schemas" \
+          "$(brew --prefix)/share/glib-2.0/schemas" \
+          "$(brew --prefix gtk+3 2>/dev/null)/share/glib-2.0/schemas" \
+        ; do
+          if ls "$dir"/org.gtk.*.gschema.xml >/dev/null 2>&1; then
+            cp "$dir"/org.gtk.*.gschema.xml "$SCHEMA_DIR/"
+            echo "Found GTK schemas in: $dir"
+            GTK_SCHEMA_FOUND=true
+            break
+          fi
+        done
+        if [ "$GTK_SCHEMA_FOUND" = false ]; then
+          echo "GTK schemas not found in any known location, installing gtk+3..."
+          brew install gtk+3
+          GTK3_SCHEMAS="$(brew --prefix gtk+3)/share/glib-2.0/schemas"
+          cp "$GTK3_SCHEMAS"/org.gtk.*.gschema.xml "$SCHEMA_DIR/"
+        fi
+        ls "$SCHEMA_DIR"/org.gtk.* 2>/dev/null || { echo "ERROR: no GTK schemas after copy" && exit 1; }
+        $PREFIX/bin/glib-compile-schemas "$SCHEMA_DIR"
+        echo "Schemas compiled in bundle"
+        # Hard verification — fail the build if FileChooser schema is missing
+        if strings "$SCHEMA_DIR/gschemas.compiled" | grep -q "org.gtk.Settings.FileChooser"; then
+          echo "OK: FileChooser schema found in compiled schemas"
+        else
+          echo "ERROR: FileChooser schema NOT in compiled schemas — file chooser will crash" && exit 1
+        fi
+    - name: Generate gdk-pixbuf loaders.cache in bundle
+      if: success()
+      run: |
+        # Query $PREFIX loaders (not the bundle copy) because the bundler
+        # rewrites dylib paths to @executable_path, making them un-dlopeable
+        # by the query tool. Then sed-replace $PREFIX paths with the bundle's
+        # relative @loader_path so the cache works wherever the .app is placed.
+        # Note: this gdk-pixbuf build is relocatable and ignores
+        # GDK_PIXBUF_MODULE_FILE — it reads loaders.cache relative to its
+        # own lib dir, so the paths inside the cache must be correct.
+        PREFIX_LOADERS="$PREFIX/lib/gdk-pixbuf-2.0/2.10.0/loaders"
+        BUNDLE_LOADERS="$GITHUB_WORKSPACE/Gnucash.app/Contents/Resources/lib/gdk-pixbuf-2.0/2.10.0/loaders"
+        CACHE_FILE="$GITHUB_WORKSPACE/Gnucash.app/Contents/Resources/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
+        GDK_PIXBUF_QUERY="$(brew --prefix)/bin/gdk-pixbuf-query-loaders"
+        if [ -d "$PREFIX_LOADERS" ] && [ -x "$GDK_PIXBUF_QUERY" ]; then
+          "$GDK_PIXBUF_QUERY" "$PREFIX_LOADERS"/*.so > "$CACHE_FILE"
+          # Replace CI-absolute loader paths with the bundle's loader dir.
+          sed -i '' "s|\"$PREFIX_LOADERS/|\"$BUNDLE_LOADERS/|g" "$CACHE_FILE"
+          LINES=$(wc -l < "$CACHE_FILE")
+          echo "Generated loaders.cache with $LINES lines"
+          if [ "$LINES" -le 5 ]; then
+            echo "ERROR: loaders.cache has no module entries"
+            cat "$CACHE_FILE"
+            exit 1
+          fi
+          echo "Cache contents:"
+          cat "$CACHE_FILE"
+        else
+          echo "ERROR: PREFIX loaders dir ($PREFIX_LOADERS) or query tool not found"
+          ls -la "$PREFIX_LOADERS" 2>/dev/null || echo "  loaders dir missing"
+          ls -la "$GDK_PIXBUF_QUERY" 2>/dev/null || echo "  query tool missing"
+          exit 1
+        fi
+    - name: Fix icon themes in bundle
+      if: success()
+      run: |
+        BUNDLE_ICONS="$GITHUB_WORKSPACE/Gnucash.app/Contents/Resources/share/icons"
+
+        # The bundler replaces hicolor/index.theme with a stub that has
+        # an empty Directories= line. Without directory entries, GTK
+        # cannot discover any icons (including GnuCash's gnc-account
+        # action icons). Copy the real index.theme from brew.
+        BREW_HICOLOR="$(brew --prefix)/share/icons/hicolor/index.theme"
+        if [ -f "$BREW_HICOLOR" ]; then
+          cp "$BREW_HICOLOR" "$BUNDLE_ICONS/hicolor/index.theme"
+          DIRS=$(grep -c '^\[' "$BUNDLE_ICONS/hicolor/index.theme")
+          echo "Restored hicolor index.theme ($DIRS sections)"
+        else
+          echo "WARNING: brew hicolor index.theme not found"
+        fi
+
+        # The bundled GTK (3.24.48) can't read icon caches generated by
+        # brew's newer GTK. Without the cache, GTK falls back to directory
+        # scanning which works correctly. Remove any caches the bundler
+        # or brew may have placed in the bundle.
+        find "$BUNDLE_ICONS" -name "icon-theme.cache" -delete -print 2>/dev/null || true
+    - name: Create binreloc compatibility symlinks
+      if: success()
+      run: |
+        # Without gtk-mac-integration, GnuCash's binreloc computes the prefix
+        # as dirname(dirname(exe)) = Contents/ (from Contents/MacOS/Gnucash-bin).
+        # It then looks for share/, lib/, etc/ under Contents/, but the bundler
+        # places everything under Contents/Resources/. These symlinks bridge
+        # the gap so binreloc-resolved paths like Contents/share/gnucash/icons
+        # resolve to the actual Contents/Resources/share/gnucash/icons.
+        cd "$GITHUB_WORKSPACE/Gnucash.app/Contents"
+        for dir in share lib bin etc; do
+          if [ -d "Resources/$dir" ] && [ ! -e "$dir" ]; then
+            ln -s "Resources/$dir" "$dir"
+            echo "Created symlink: Contents/$dir -> Resources/$dir"
+          fi
+        done
+    - name: Package app bundle
+      if: success()
+      run: |
+        ditto -c -k --sequesterRsrc --keepParent \
+          $GITHUB_WORKSPACE/Gnucash.app $GITHUB_WORKSPACE/Gnucash.app.zip
+    - uses: actions/upload-artifact@v4
+      if: success()
+      with:
+        name: Gnucash.app
+        path: ${{ github.workspace }}/Gnucash.app.zip
+        retention-days: 30
     - uses: actions/upload-artifact@v4
       if: failure()
       with:
