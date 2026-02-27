@@ -1,0 +1,63 @@
+#!/bin/sh
+# Launcher script for GnuCash.app bundle.
+# Sets environment variables so GTK/GLib/GnuCash find their data
+# inside Contents/Resources/ rather than system paths.
+
+name=$(basename "$0")
+tmp="$0"
+tmp=$(dirname "$tmp")
+tmp=$(dirname "$tmp")
+bundle=$(dirname "$tmp")
+bundle_contents="$bundle/Contents"
+bundle_res="$bundle_contents/Resources"
+bundle_lib="$bundle_res/lib"
+bundle_bin="$bundle_res/bin"
+bundle_data="$bundle_res/share"
+bundle_etc="$bundle_res/etc"
+
+export XDG_CONFIG_DIRS="$bundle_etc/xdg"
+export XDG_DATA_DIRS="$bundle_data"
+export GTK_DATA_PREFIX="$bundle_res"
+export GTK_EXE_PREFIX="$bundle_res"
+export GTK_PATH="$bundle_res"
+
+# The gdk-pixbuf in the dep tarball is a relocatable build — it finds
+# loaders.cache relative to its own lib dir, ignoring GDK_PIXBUF_MODULE_FILE.
+# But the module paths INSIDE the cache are absolute CI build paths.
+# Rewrite them to the actual bundle location at launch time.
+_loaders_src="$bundle_lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
+_loaders_run="${TMPDIR:-/tmp}/gnucash-loaders.cache"
+if [ -f "$_loaders_src" ]; then
+    sed "s|\"/.*/lib/gdk-pixbuf-2.0/|\"$bundle_lib/gdk-pixbuf-2.0/|g" \
+        "$_loaders_src" > "$_loaders_run"
+    # Overwrite the bundle copy so the relocatable library reads correct paths
+    cp "$_loaders_run" "$_loaders_src" 2>/dev/null || true
+fi
+export GDK_PIXBUF_MODULE_FILE="$bundle_lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
+export GSETTINGS_SCHEMA_DIR="$bundle_data/glib-2.0/schemas"
+
+export PANGO_SYSCONFDIR="$bundle_etc"
+export PANGO_LIBDIR="$bundle_lib"
+
+if test -f "$bundle_lib/charset.alias"; then
+    export CHARSETALIASDIR="$bundle_lib"
+fi
+
+export RESPFX="$bundle_res"
+export PATH="$RESPFX/bin:/bin:/usr/bin"
+
+export GUILE_WARN_DEPRECATED="no"
+export GNC_MODULE_PATH="$RESPFX/lib/gnucash"
+export GNC_DOT_DIR="$HOME/Library/Application Support/Gnucash"
+export OFX_DTD_PATH="$bundle_data/libofx/dtd"
+
+# Guile 3.0 paths
+export GUILE_LOAD_PATH="$bundle_data/guile/3.0"
+export GUILE_LOAD_COMPILED_PATH="$bundle_lib/guile/3.0/ccache"
+
+# Strip macOS-added -psn_ argument
+if /bin/expr "x$1" : "x-psn_.*" > /dev/null; then
+    shift 1
+fi
+
+exec "$bundle_contents/MacOS/$name-bin" "$@"

@@ -1,0 +1,136 @@
+<?xml version="1.0" standalone="no"?> <!--*- mode: xml -*-->
+<!--
+  Custom GnuCash macOS app bundle definition.
+  Stripped-down version of Gnucash/gnucash-on-osx gnucash.bundle.
+
+  The prebuilt dep tarball includes libraries, binaries, and some
+  share/ data, but NOT: share/aqbanking, share/gwenhywfar,
+  share/themes, share/mime, etc/fonts.
+  share/libofx is populated by the CI workflow from brew before bundling.
+
+  Paths verified against CI diagnostic ls of $PREFIX after tarball
+  extraction + ninja install.
+-->
+<app-bundle>
+
+  <meta>
+    <prefix name="default">${env:PREFIX}</prefix>
+    <destination overwrite="yes">${env:BUNDLE_DEST}</destination>
+    <gtk>gtk+-3.0</gtk>
+    <run-install-name-tool/>
+  </meta>
+
+  <plist>${project}/Info.plist</plist>
+  <entitlements>${project}/gnucash.entitlements.plist</entitlements>
+  <launcher-script>${project}/gnucash.launcher</launcher-script>
+
+  <main-binary>${prefix}/bin/gnucash</main-binary>
+
+  <!-- GTK+ modules (from dep tarball lib/) -->
+  <binary>
+    ${prefix}/lib/gdk-pixbuf-2.0/${pkg:gdk-pixbuf-2.0:gdk_pixbuf_binary_version}/loaders/*.so
+  </binary>
+
+  <binary>
+    ${prefix}/lib/gtk-3.0/${pkg:gtk+-3.0:gtk_binary_version}/immodules/im-quartz.so
+  </binary>
+
+  <binary>
+    ${prefix}/lib/gtk-3.0/${pkg:gtk+-3.0:gtk_binary_version}/printbackends/*.so
+  </binary>
+
+  <binary loadable="True">
+    ${prefix}/lib/gio
+  </binary>
+
+  <!-- GnuCash modules (from ninja install) -->
+  <binary loadable="True">
+    ${prefix}/lib/gnucash
+  </binary>
+
+  <!-- Banking/DB modules (from dep tarball lib/) -->
+  <binary loadable="True">
+    ${prefix}/lib/aqbanking
+  </binary>
+
+  <binary loadable="True">
+    ${prefix}/lib/gwenhywfar
+  </binary>
+
+  <binary loadable="True">
+    ${prefix}/lib/mariadb
+  </binary>
+
+  <binary loadable="True">
+    ${prefix}/lib/dbd
+  </binary>
+
+  <!-- CLI tools -->
+  <binary dest="${bundle}/Contents/MacOS">
+    ${prefix}/bin/gnucash-cli
+  </binary>
+
+  <binary dest="${bundle}/Contents/MacOS">
+    ${prefix}/bin/aqbanking-cli
+  </binary>
+
+  <binary dest="${bundle}/Contents/MacOS">
+    ${prefix}/bin/aqhbci-tool4
+  </binary>
+
+  <!-- Data files (verified to exist in CI) -->
+  <data>
+    ${prefix}/etc/gnucash
+  </data>
+
+  <data>
+    ${prefix}/share/glib-2.0/schemas
+  </data>
+
+  <data>
+    ${prefix}/share/gnucash
+  </data>
+
+  <data>
+    ${prefix}/share/guile
+  </data>
+
+  <data recurse="True">
+    ${prefix}/lib/guile/3.0/*.go
+  </data>
+
+  <data>
+    ${prefix}/share/icons
+  </data>
+
+  <data>
+    ${prefix}/share/doc/gnucash/
+  </data>
+
+  <!-- libofx DTD files (OFX/QFX parser needs these at runtime) -->
+  <data>
+    ${prefix}/share/libofx
+  </data>
+
+  <data dest="${bundle}/Contents/Resources">
+    ${project}/gnucash.icns
+  </data>
+
+  <!-- Translations -->
+  <translations name="gnucash">
+    ${prefix}/share/locale
+  </translations>
+
+  <translations name="gtk30">
+    ${prefix}/share/locale
+  </translations>
+
+  <translations name="iso_4217">
+    ${prefix}/share/locale
+  </translations>
+
+  <data dest="${bundle}/Contents/Resources/etc/gtk-3.0/settings.ini">
+    ${project}/settings.ini
+  </data>
+
+</app-bundle>

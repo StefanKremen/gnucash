@@ -18,6 +18,7 @@
 .scm-links
 .vscode/
 .cache/
+.planning/
 ChangeLog
 Makefile
 Makefile.in
