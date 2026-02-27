@@ -418,6 +418,45 @@ fix_ofx_bug_39 (time64 t)
     return t;
 }
 
+/* --- Fio Banka customization helpers --- */
+
+static bool
+is_fio_banka(const OfxTransactionData *data)
+{
+    return (data->account_ptr
+            && data->account_ptr->bank_id_valid
+            && strcmp(data->account_ptr->bank_id, "2010") == 0);
+}
+
+static time64
+extract_date_from_fio_memo(const char *memo)
+{
+    g_return_val_if_fail(memo != NULL, 0);
+
+    const char *marker = strstr(memo, ", dne ");
+    if (!marker)
+        return 0;
+
+    const char *date_start = marker + 6;  /* skip ", dne " */
+
+    int day = 0, month = 0, year = 0;
+    int consumed = 0;
+    if (sscanf(date_start, "%d.%d.%d%n", &day, &month, &year, &consumed) != 3)
+        return 0;
+
+    /* Verify closing context: ", castka" must follow immediately */
+    if (strncmp(date_start + consumed, ", castka", 8) != 0)
+        return 0;
+
+    /* Basic range validation (v2 adds g_date_valid_dmy via HARD-01) */
+    if (day < 1 || day > 31 || month < 1 || month > 12
+        || year < 2000 || year > 2100)
+        return 0;
+
+    /* Use gnc_dmy2time64_neutral (10:59 UTC) to avoid timezone date-shift */
+    return gnc_dmy2time64_neutral(day, month, year);
+}
+
 static void
 set_transaction_dates(Transaction *transaction, OfxTransactionData *data)
 {
@@ -963,6 +1002,30 @@ int ofx_proc_transaction_cb(OfxTransactionData data, void *user_data)
     set_transaction_dates(transaction, &data);
     fill_transaction_description(transaction, &data);
     fill_transaction_notes(transaction, &data);
+
+    /* --- Fio Banka: override description and date --- */
+    if (is_fio_banka(&data))
+    {
+        /* OFX-07: Use MEMO as Description, NAME as Notes (all Fio transactions) */
+        if (data.memo_valid)
+        {
+            xaccTransSetDescription(transaction, data.memo);
+        }
+        if (data.name_valid)
+        {
+            xaccTransSetNotes(transaction, data.name);
+        }
+
+        /* OFX-02: Extract actual transaction date from MEMO pattern */
+        if (data.memo_valid)
+        {
+            time64 memo_date = extract_date_from_fio_memo(data.memo);
+            if (memo_date != 0)
+            {
+                xaccTransSetDatePostedSecsNormalized(transaction, memo_date);
+            }
+        }
+    }
 
     if (data.account_ptr && data.account_ptr->currency_valid)
     {
